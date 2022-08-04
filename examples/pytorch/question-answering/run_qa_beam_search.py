@@ -25,7 +25,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import datasets
-from datasets import load_dataset, load_metric
+import pandas
+from datasets import load_dataset, load_metric, Dataset
 
 import transformers
 from trainer_qa import QuestionAnsweringTrainer
@@ -203,13 +204,13 @@ class DataTrainingArguments:
         else:
             if self.train_file is not None:
                 extension = self.train_file.split(".")[-1]
-                assert extension in ["csv", "json"], "`train_file` should be a csv or a json file."
+                assert extension in ["csv", "json", "pkl"], "`train_file` should be a csv or a json file."    # added pkl
             if self.validation_file is not None:
                 extension = self.validation_file.split(".")[-1]
-                assert extension in ["csv", "json"], "`validation_file` should be a csv or a json file."
+                assert extension in ["csv", "json", "pkl"], "`validation_file` should be a csv or a json file."   # added pkl
             if self.test_file is not None:
                 extension = self.test_file.split(".")[-1]
-                assert extension in ["csv", "json"], "`test_file` should be a csv or a json file."
+                assert extension in ["csv", "json", "pkl"], "`test_file` should be a csv or a json file."    # added pkl
 
 
 def main():
@@ -286,22 +287,33 @@ def main():
         )
     else:
         data_files = {}
+        data_frames = dict()   # added initialization
+
         if data_args.train_file is not None:
             data_files["train"] = data_args.train_file
             extension = data_args.train_file.split(".")[-1]
+            data_frames["train"] = Dataset.from_dict(pandas.read_pickle(data_files["train"]))  # added segment
         if data_args.validation_file is not None:
             data_files["validation"] = data_args.validation_file
             extension = data_args.validation_file.split(".")[-1]
+            data_frames["validation"] = Dataset.from_dict(pandas.read_pickle(data_files["validation"]))    # added segment
         if data_args.test_file is not None:
             data_files["test"] = data_args.test_file
             extension = data_args.test_file.split(".")[-1]
-        raw_datasets = load_dataset(
-            extension,
-            data_files=data_files,
-            field="data",
-            cache_dir=model_args.cache_dir,
-            use_auth_token=True if model_args.use_auth_token else None,
-        )
+            data_frames["test"] = Dataset.from_dict(pandas.read_pickle(data_files["test"]))    # added segment
+
+        # raw_datasets = load_dataset(
+        #     extension,
+        #     data_files=data_files,
+        #     field="data",
+        #     cache_dir=model_args.cache_dir,
+        #     use_auth_token=True if model_args.use_auth_token else None,
+        # )
+
+        # added section for custom file loading
+        raw_datasets = datasets.DatasetDict(data_frames)
+        # added section ends
+
     # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
     # https://huggingface.co/docs/datasets/loading_datasets.html.
 
@@ -352,6 +364,7 @@ def main():
             f"model ({tokenizer.model_max_length}). Using max_seq_length={tokenizer.model_max_length}."
         )
     max_seq_length = min(data_args.max_seq_length, tokenizer.model_max_length)
+
 
     # Training preprocessing
     def prepare_train_features(examples):
@@ -454,29 +467,6 @@ def main():
 
         return tokenized_examples
 
-    if training_args.do_train:
-        if "train" not in raw_datasets:
-            raise ValueError("--do_train requires a train dataset")
-        train_dataset = raw_datasets["train"]
-        if data_args.max_train_samples is not None:
-            # Select samples from Dataset, This will help to decrease processing time
-            max_train_samples = min(len(train_dataset), data_args.max_train_samples)
-            train_dataset = train_dataset.select(range(max_train_samples))
-        # Create Training Features
-        with training_args.main_process_first(desc="train dataset map pre-processing"):
-            train_dataset = train_dataset.map(
-                prepare_train_features,
-                batched=True,
-                num_proc=data_args.preprocessing_num_workers,
-                remove_columns=column_names,
-                load_from_cache_file=not data_args.overwrite_cache,
-                desc="Running tokenizer on train dataset",
-            )
-        if data_args.max_train_samples is not None:
-            # Select samples from dataset again since Feature Creation might increase number of features
-            max_train_samples = min(len(train_dataset), data_args.max_train_samples)
-            train_dataset = train_dataset.select(range(max_train_samples))
-
     # Validation preprocessing
     def prepare_validation_features(examples):
         # Tokenize our examples with truncation and maybe padding, but keep the overflows using a stride. This results
@@ -543,6 +533,54 @@ def main():
 
         return tokenized_examples
 
+    if training_args.do_train:
+        if "train" not in raw_datasets:
+            raise ValueError("--do_train requires a train dataset")
+        train_dataset = raw_datasets["train"]
+        train_examples = raw_datasets["train"] #added initialization
+        if data_args.max_train_samples is not None:
+            # Select samples from Dataset, This will help to decrease processing time
+            max_train_samples = min(len(train_dataset), data_args.max_train_samples)
+
+            # added section for training metrics
+            train_examples = train_dataset.select(range(max_train_samples))
+            # added section ends
+
+            train_dataset = train_dataset.select(range(max_train_samples))
+
+        # Create Training Features
+        with training_args.main_process_first(desc="train dataset map pre-processing"):
+            train_dataset = train_dataset.map(
+                prepare_train_features,
+                batched=True,
+                num_proc=data_args.preprocessing_num_workers,
+                remove_columns=column_names,
+                load_from_cache_file=not data_args.overwrite_cache,
+                desc="Running tokenizer on train dataset",
+            )
+
+            # added section for training metrics
+            train_dataset_new = train_examples.map(
+                prepare_validation_features,
+                batched=True,
+                num_proc=data_args.preprocessing_num_workers,
+                remove_columns=column_names,
+                load_from_cache_file=not data_args.overwrite_cache,
+                desc="Running tokenizer on train dataset",
+            )
+            # added section ends
+
+        if data_args.max_train_samples is not None:
+            # Select samples from dataset again since Feature Creation might increase number of features
+            max_train_samples = min(len(train_dataset), data_args.max_train_samples)
+            train_dataset = train_dataset.select(range(max_train_samples))
+
+            # added section for training metrics
+            train_dataset_new = train_dataset_new.select(range(max_train_samples))
+            # added section ends
+
+
+
     if training_args.do_eval:
         if "validation" not in raw_datasets:
             raise ValueError("--do_eval requires a validation dataset")
@@ -561,10 +599,26 @@ def main():
                 load_from_cache_file=not data_args.overwrite_cache,
                 desc="Running tokenizer on validation dataset",
             )
+
+            # added section for validation loss
+            eval_dataset_new = eval_examples.map(
+                prepare_train_features,
+                batched=True,
+                num_proc=data_args.preprocessing_num_workers,
+                remove_columns=column_names,
+                load_from_cache_file=not data_args.overwrite_cache,
+                desc="Running tokenizer on validation dataset",
+            )
+            # added section ends
+
         if data_args.max_eval_samples is not None:
             # Selecting Samples from Dataset again since Feature Creation might increase samples size
             max_eval_samples = min(len(eval_dataset), data_args.max_eval_samples)
             eval_dataset = eval_dataset.select(range(max_eval_samples))
+
+            # added section for validation loss
+            eval_dataset_new = eval_dataset_new.select(range(max_eval_samples))
+            # added section ends
 
     if training_args.do_predict:
         if "test" not in raw_datasets:
@@ -641,6 +695,16 @@ def main():
         data_collator=data_collator,
         post_process_function=post_processing_function,
         compute_metrics=compute_metrics,
+
+        # added section for validation loss
+        eval_custom_dataset=eval_dataset_new if training_args.do_eval else None,
+        # added section end
+
+        # added section for training metrics
+        train_examples=train_examples if training_args.do_train else None,
+        train_custom_dataset=train_dataset_new if training_args.do_train else None,
+        # added section end
+
     )
 
     # Training
